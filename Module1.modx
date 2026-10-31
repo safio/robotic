@@ -1,41 +1,147 @@
 MODULE Module1
+    !----------------------------------------------------------
+    ! Settings
+    !----------------------------------------------------------
     ! Dwell time at each target, in seconds
     CONST num nWaitTime:=1;
-    ! Stopwatch used to measure the cycle time
+    ! Robot speed: use v200 for first tests, v1000 once validated
+    CONST speeddata vRun:=v1000;
+    ! Slower speed for going home from an unknown position
+    CONST speeddata vHome:=v300;
+    ! Circle: radius in mm and speed along the circle
+    CONST num nRadius:=50;
+    CONST speeddata vCircle:=v200;
+    ! Also copy every log line to the event log (Output window)
+    CONST bool bEchoToEventLog:=TRUE;
+    ! Log file in the controller's HOME folder
+    CONST string sLogFile:="path_log.txt";
+
+    !----------------------------------------------------------
+    ! Data
+    !----------------------------------------------------------
+    ! Cycle counter, kept between runs (set to 0 by hand to reset)
+    PERS num nCycle:=1;
+    ! Stopwatch for the cycle time
     VAR clock clkCycle;
+
+    ! Default (home) position, as joint angles in degrees [J1,J2,J3,J4,J5,J6]
+    ! EXAMPLE VALUES - replace with the pose you teach (see LogJoints)
+    CONST jointtarget jHome:=[[0,0,0,0,30,0],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];
 
     CONST robtarget P0:=[[403.537986234,-188.687598528,508.548889922],[0.171587013,0.119601029,-0.957497064,0.198627448],[-1,-1,-1,0],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];
     CONST robtarget P1:=[[59.861046152,-435.093959089,531.519324852],[0.230386213,-0.358491153,-0.89758559,0.112899935],[-1,-1,-1,0],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];
     CONST robtarget P2:=[[-380.98775554,-218.491317872,531.519344991],[0.254131661,-0.799126114,-0.543666499,-0.03523197],[-2,-1,-1,0],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];
 
-    ! Writes a time-stamped message to the FlexPendant / Operator Window
-    PROC LogMsg(string sMsg)
-        TPWrite CTime()+" | "+sMsg;
+    !----------------------------------------------------------
+    ! Main program
+    !----------------------------------------------------------
+    PROC main()
+        nCycle:=nCycle+1;
+        LogMsg "Cycle "+ValToStr(nCycle)+" started";
+        ClkReset clkCycle;
+        ClkStart clkCycle;
+        GoHome;
+        Path_10;
+        DrawCircle P0,nRadius,vCircle;
+        GoHome;
+        ClkStop clkCycle;
+        LogMsg "Cycle "+ValToStr(nCycle)+" done in "+NumToStr(ClkRead(clkCycle),2)+" s";
+    ERROR
+        LogMsg "ERROR "+ValToStr(ERRNO)+" in cycle "+ValToStr(nCycle);
+        RAISE;
     ENDPROC
 
     PROC Path_10()
-        LogMsg "Path_10 started";
-        MoveJ P0,v1000,fine,MyTool\WObj:=wobj0;
-        LogMsg "Reached P0";
-        WaitTime\inpos,nWaitTime;
-        MoveL P1,v1000,fine,MyTool\WObj:=wobj0;
-        LogMsg "Reached P1";
-        WaitTime\inpos,nWaitTime;
-        MoveL P2,v1000,fine,MyTool\WObj:=wobj0;
-        LogMsg "Reached P2";
-        WaitTime\inpos,nWaitTime;
-        MoveL P0,v1000,fine,MyTool\WObj:=wobj0;
-        LogMsg "Back at P0";
-        WaitTime\inpos,nWaitTime;
-        LogMsg "Path_10 finished";
+        MoveJ P0,vRun,fine,MyTool\WObj:=wobj0;
+        LogPos "P0";
+        WaitTime\InPos,nWaitTime;
+        MoveL P1,vRun,fine,MyTool\WObj:=wobj0;
+        LogPos "P1";
+        WaitTime\InPos,nWaitTime;
+        MoveL P2,vRun,fine,MyTool\WObj:=wobj0;
+        LogPos "P2";
+        WaitTime\InPos,nWaitTime;
+        MoveL P0,vRun,fine,MyTool\WObj:=wobj0;
+        LogPos "P0";
+        WaitTime\InPos,nWaitTime;
     ENDPROC
 
-    PROC main()
-        ClkReset clkCycle;
-        ClkStart clkCycle;
-        Path_10;
-        ClkStop clkCycle;
-        LogMsg "Cycle time: "+NumToStr(ClkRead(clkCycle),2)+" s";
+    !----------------------------------------------------------
+    ! Circle
+    !----------------------------------------------------------
+    ! Draws a full horizontal circle (XY plane of wobj0) around pCenter.
+    ! The tool keeps the orientation of pCenter all the way round.
+    PROC DrawCircle(robtarget pCenter,num nR,speeddata vSpeed)
+        VAR robtarget p0deg;
+        VAR robtarget p90deg;
+        VAR robtarget p180deg;
+        VAR robtarget p270deg;
+
+        ! Four points on the circle, computed from the center
+        p0deg:=Offs(pCenter,nR,0,0);
+        p90deg:=Offs(pCenter,0,nR,0);
+        p180deg:=Offs(pCenter,-nR,0,0);
+        p270deg:=Offs(pCenter,0,-nR,0);
+
+        LogMsg "Circle start, radius "+NumToStr(nR,1)+" mm";
+        ! Computed points: let the robot choose the closest arm configuration
+        ConfL\Off;
+        MoveL p0deg,vSpeed,fine,MyTool\WObj:=wobj0;
+        LogPos "circle start";
+        WaitTime\InPos,nWaitTime;
+        ! First half: 0 -> 90 -> 180 degrees
+        MoveC p90deg,p180deg,vSpeed,z10,MyTool\WObj:=wobj0;
+        ! Second half: 180 -> 270 -> 0 degrees
+        MoveC p270deg,p0deg,vSpeed,fine,MyTool\WObj:=wobj0;
+        ConfL\On;
+        LogPos "circle end";
+        WaitTime\InPos,nWaitTime;
+    ERROR
+        ConfL\On;
+        RAISE;
+    ENDPROC
+
+    !----------------------------------------------------------
+    ! Home position
+    !----------------------------------------------------------
+    ! Moves the robot to the default position
+    PROC GoHome()
+        LogMsg "Going home";
+        MoveAbsJ jHome\NoEOffs,vHome,fine,MyTool\WObj:=wobj0;
+        LogMsg "At home";
+    ENDPROC
+
+    ! Logs the current joint angles, ready to paste into jHome
+    PROC LogJoints()
+        VAR jointtarget jNow;
+        jNow:=CJointT();
+        LogMsg "Joints ["+NumToStr(jNow.robax.rax_1,1)+","+NumToStr(jNow.robax.rax_2,1)+","+NumToStr(jNow.robax.rax_3,1)+","+NumToStr(jNow.robax.rax_4,1)+","+NumToStr(jNow.robax.rax_5,1)+","+NumToStr(jNow.robax.rax_6,1)+"]";
+    ENDPROC
+
+    !----------------------------------------------------------
+    ! Logging
+    !----------------------------------------------------------
+    ! Logs the actual TCP position after a move
+    PROC LogPos(string sName)
+        VAR robtarget pNow;
+        pNow:=CRobT(\Tool:=MyTool\WObj:=wobj0);
+        LogMsg "At "+sName+" x="+NumToStr(pNow.trans.x,1)+" y="+NumToStr(pNow.trans.y,1)+" z="+NumToStr(pNow.trans.z,1);
+    ENDPROC
+
+    ! Writes one time-stamped line to the Operator Window, the log file,
+    ! and (optionally) the event log
+    PROC LogMsg(string sMsg)
+        VAR iodev logFile;
+        VAR string sLine;
+        sLine:=CTime()+" | "+sMsg;
+        TPWrite sLine;
+        IF bEchoToEventLog ErrWrite\I,"Module1 log",sLine;
+        Open "HOME:"\File:=sLogFile,logFile\Append;
+        Write logFile,CDate()+" "+sLine;
+        Close logFile;
+    ERROR
+        ! If the file can't be written, skip it and keep the robot running
+        RETURN;
     ENDPROC
 
     LOCAL PROC Routine1()
