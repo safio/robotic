@@ -1,0 +1,44 @@
+MODULE Module1
+    ! Dwell time at each target, in seconds
+    CONST num nWaitTime:=1;
+    ! Stopwatch used to measure the cycle time
+    VAR clock clkCycle;
+
+    CONST robtarget P0:=[[403.537986234,-188.687598528,508.548889922],[0.171587013,0.119601029,-0.957497064,0.198627448],[-1,-1,-1,0],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];
+    CONST robtarget P1:=[[59.861046152,-435.093959089,531.519324852],[0.230386213,-0.358491153,-0.89758559,0.112899935],[-1,-1,-1,0],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];
+    CONST robtarget P2:=[[-380.98775554,-218.491317872,531.519344991],[0.254131661,-0.799126114,-0.543666499,-0.03523197],[-2,-1,-1,0],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];
+
+    ! Writes a time-stamped message to the FlexPendant / Operator Window
+    PROC LogMsg(string sMsg)
+        TPWrite CTime()+" | "+sMsg;
+    ENDPROC
+
+    PROC Path_10()
+        LogMsg "Path_10 started";
+        MoveJ P0,v1000,fine,MyTool\WObj:=wobj0;
+        LogMsg "Reached P0";
+        WaitTime\inpos,nWaitTime;
+        MoveL P1,v1000,fine,MyTool\WObj:=wobj0;
+        LogMsg "Reached P1";
+        WaitTime\inpos,nWaitTime;
+        MoveL P2,v1000,fine,MyTool\WObj:=wobj0;
+        LogMsg "Reached P2";
+        WaitTime\inpos,nWaitTime;
+        MoveL P0,v1000,fine,MyTool\WObj:=wobj0;
+        LogMsg "Back at P0";
+        WaitTime\inpos,nWaitTime;
+        LogMsg "Path_10 finished";
+    ENDPROC
+
+    PROC main()
+        ClkReset clkCycle;
+        ClkStart clkCycle;
+        Path_10;
+        ClkStop clkCycle;
+        LogMsg "Cycle time: "+NumToStr(ClkRead(clkCycle),2)+" s";
+    ENDPROC
+
+    LOCAL PROC Routine1()
+
+    ENDPROC
+ENDMODULE
