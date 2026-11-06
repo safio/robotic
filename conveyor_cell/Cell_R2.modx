@@ -1,0 +1,221 @@
+MODULE Cell_R2
+    !----------------------------------------------------------
+    ! Conveyor cell with two robots (MultiMove, independent motion)
+    ! This module runs in task T_ROB2. Its twin Cell_R1 runs in T_ROB1.
+    ! The robots take turns: robot 1 picks part 1, robot 2 part 2, ...
+    ! Only the robot whose turn it is enters the pick zone, stops and
+    ! restarts the conveyor, so the two arms never meet there.
+    !----------------------------------------------------------
+
+    !----------------------------------------------------------
+    ! Settings
+    !----------------------------------------------------------
+    ! Identity of this robot (1 or 2) and of the other one
+    CONST num nMyId:=2;
+    CONST num nOtherId:=1;
+    ! Number of parts the whole cell handles per run (both robots)
+    CONST num nBatch:=12;
+    ! Robot speeds: use v200 for first tests
+    CONST speeddata vRun:=v1000;
+    CONST speeddata vApproach:=v200;
+    CONST speeddata vHome:=v300;
+    ! Height of the approach point above pick and place, in mm
+    CONST num nApproachZ:=100;
+    ! Time to let the gripper open or close, in seconds
+    CONST num nGripTime:=0.5;
+    ! Max wait for a part at the sensor before logging a warning, in s
+    CONST num nPartTimeout:=30;
+    ! Pallet: 3 x 2 slots, pitch in mm (x = columns, y = rows)
+    CONST num nPalCols:=3;
+    CONST num nPalRows:=2;
+    CONST num nPitchX:=80;
+    CONST num nPitchY:=80;
+    ! Also copy every log line to the event log (Output window)
+    CONST bool bEchoToEventLog:=TRUE;
+    ! Log file in the controller's HOME folder (one file per robot)
+    CONST string sLogFile:="cell_r2_log.txt";
+
+    !----------------------------------------------------------
+    ! I/O (create these signals in I/O Engineering first)
+    !----------------------------------------------------------
+    ! doConvRun   : DO, 1 = conveyor runs      (shared by both robots)
+    ! diPartAtPick: DI, 1 = part at pick point (shared by both robots)
+    ! doGrip2     : DO, 1 = gripper of R2 closed
+
+    !----------------------------------------------------------
+    ! Shared data (same PERS declarations in Cell_R2 and Cell_R1)
+    !----------------------------------------------------------
+    ! Whose turn it is to pick: 1 or 2
+    PERS num nTurn:=1;
+    ! Parts picked by the whole cell in this run
+    PERS num nPartsTotal:=0;
+    ! TRUE = batch finished, both robots go home and stop
+    PERS bool bCellDone:=FALSE;
+    ! Tasks that start together
+    PERS tasks tlRobots{2}:=[["T_ROB1"],["T_ROB2"]];
+    VAR syncident syncStart;
+    VAR syncident syncEnd;
+
+    !----------------------------------------------------------
+    ! Data
+    !----------------------------------------------------------
+    ! Gripper tool of R2
+    ! PLACEHOLDER: measure the real TCP and set the real load
+    PERS tooldata tGripper2:=[TRUE,[[0,0,150],[1,0,0,0]],[1,[0,0,50],[1,0,0,0],0,0,0]];
+    ! Slots already filled on this robot's pallet (set to 0 when emptied)
+    PERS num nSlot:=0;
+    ! Stopwatch for the part cycle time
+    VAR clock clkPart;
+
+    ! Home position, joint angles in degrees [J1,J2,J3,J4,J5,J6]
+    ! PLACEHOLDER - teach your own (see LogJoints)
+    CONST jointtarget jHome:=[[0,0,0,0,30,0],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];
+
+    ! PLACEHOLDER TARGETS - teach all three on your station (wobj0 of R2)
+    ! pPick  : gripper on the part at the conveyor sensor
+    ! pClear : out of the pick zone, where R2 waits for its turn
+    ! pPlace0: gripper on slot 1 (first column, first row) of R2's pallet
+    CONST robtarget pPick:=[[600,0,300],[0,0,1,0],[0,0,0,0],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];
+    CONST robtarget pClear:=[[450,-300,500],[0,0,1,0],[-1,0,0,0],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];
+    CONST robtarget pPlace0:=[[300,-500,250],[0,0,1,0],[-1,0,0,0],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];
+
+    !----------------------------------------------------------
+    ! Main program
+    !----------------------------------------------------------
+    PROC main()
+        ! Robot 1 (only) resets the shared data before the robots start together
+        IF nMyId=1 THEN
+            SetDO doConvRun,0;
+            nTurn:=1;
+            nPartsTotal:=0;
+            bCellDone:=FALSE;
+        ENDIF
+        SetDO doGrip2,0;
+        GoHome;
+        LogMsg "R2 ready, waiting for R1";
+        WaitSyncTask syncStart,tlRobots;
+        ! Robot 1 (only) starts the conveyor for the first part
+        IF nMyId=1 SetDO doConvRun,1;
+        LogMsg "Cell started, batch "+ValToStr(nBatch);
+
+        MoveJ pClear,vRun,fine,tGripper2\WObj:=wobj0;
+        WHILE NOT bCellDone DO
+            ! Wait for my turn (or for the end of the batch)
+            WaitUntil nTurn=nMyId OR bCellDone;
+            IF NOT bCellDone THEN
+                PickAndPlace;
+            ENDIF
+        ENDWHILE
+
+        GoHome;
+        WaitSyncTask syncEnd,tlRobots;
+        LogMsg "Cell done, "+ValToStr(nPartsTotal)+" parts";
+    ERROR
+        ! Stop the conveyor so parts don't pile up while stopped
+        SetDO doConvRun,0;
+        LogMsg "R2 ERROR "+ValToStr(ERRNO)+" part "+ValToStr(nPartsTotal);
+        RAISE;
+    ENDPROC
+
+    !----------------------------------------------------------
+    ! Pick and place
+    !----------------------------------------------------------
+    ! One part: pick at the conveyor, hand over the turn, place on pallet
+    PROC PickAndPlace()
+        VAR bool bTimeout;
+        VAR robtarget pSlot;
+
+        ClkReset clkPart;
+        ClkStart clkPart;
+
+        ! Wait for a part at the sensor, then stop the conveyor
+        bTimeout:=TRUE;
+        WHILE bTimeout DO
+            WaitDI diPartAtPick,1\MaxTime:=nPartTimeout\TimeFlag:=bTimeout;
+            IF bTimeout LogMsg "R2: no part after "+NumToStr(nPartTimeout,0)+" s";
+        ENDWHILE
+        SetDO doConvRun,0;
+
+        ! Pick
+        SetDO doGrip2,0;
+        MoveJ Offs(pPick,0,0,nApproachZ),vRun,z10,tGripper2\WObj:=wobj0;
+        MoveL pPick,vApproach,fine,tGripper2\WObj:=wobj0;
+        SetDO doGrip2,1;
+        WaitTime nGripTime;
+        MoveL Offs(pPick,0,0,nApproachZ),vApproach,fine,tGripper2\WObj:=wobj0;
+        nPartsTotal:=nPartsTotal+1;
+        LogMsg "R2 picked part "+ValToStr(nPartsTotal);
+
+        ! Leave the pick zone BEFORE handing over the turn
+        MoveJ pClear,vRun,fine,tGripper2\WObj:=wobj0;
+        IF nPartsTotal>=nBatch THEN
+            bCellDone:=TRUE;
+        ELSE
+            nTurn:=nOtherId;
+            SetDO doConvRun,1;
+        ENDIF
+
+        ! Place in the next free slot of the pallet
+        pSlot:=SlotTarget(nSlot);
+        MoveJ Offs(pSlot,0,0,nApproachZ),vRun,z10,tGripper2\WObj:=wobj0;
+        MoveL pSlot,vApproach,fine,tGripper2\WObj:=wobj0;
+        SetDO doGrip2,0;
+        WaitTime nGripTime;
+        MoveL Offs(pSlot,0,0,nApproachZ),vApproach,fine,tGripper2\WObj:=wobj0;
+        LogMsg "R2 placed in slot "+ValToStr(nSlot+1);
+        nSlot:=nSlot+1;
+        IF nSlot>=nPalCols*nPalRows THEN
+            ! Pallet full: wrap around (replace with your own pallet change)
+            LogMsg "R2 pallet full, empty it";
+            nSlot:=0;
+        ENDIF
+
+        MoveJ pClear,vRun,fine,tGripper2\WObj:=wobj0;
+        ClkStop clkPart;
+        LogMsg "R2 part cycle "+NumToStr(ClkRead(clkPart),2)+" s";
+    ENDPROC
+
+    ! Target of pallet slot n (0-based), row by row from pPlace0
+    FUNC robtarget SlotTarget(num n)
+        VAR num nCol;
+        VAR num nRow;
+        nCol:=n MOD nPalCols;
+        nRow:=n DIV nPalCols;
+        RETURN Offs(pPlace0,nCol*nPitchX,nRow*nPitchY,0);
+    ENDFUNC
+
+    !----------------------------------------------------------
+    ! Home position
+    !----------------------------------------------------------
+    PROC GoHome()
+        LogMsg "R2 going home";
+        MoveAbsJ jHome\NoEOffs,vHome,fine,tGripper2\WObj:=wobj0;
+        LogMsg "R2 at home";
+    ENDPROC
+
+    ! Logs the current joint angles, ready to paste into jHome
+    PROC LogJoints()
+        VAR jointtarget jNow;
+        jNow:=CJointT();
+        LogMsg "J ["+NumToStr(jNow.robax.rax_1,1)+","+NumToStr(jNow.robax.rax_2,1)+","+NumToStr(jNow.robax.rax_3,1)+","+NumToStr(jNow.robax.rax_4,1)+","+NumToStr(jNow.robax.rax_5,1)+","+NumToStr(jNow.robax.rax_6,1)+"]";
+    ENDPROC
+
+    !----------------------------------------------------------
+    ! Logging
+    !----------------------------------------------------------
+    ! One time-stamped line to the Operator Window, the log file,
+    ! and (optionally) the event log
+    PROC LogMsg(string sMsg)
+        VAR iodev logFile;
+        VAR string sLine;
+        sLine:=CTime()+" | "+sMsg;
+        TPWrite sLine;
+        IF bEchoToEventLog ErrWrite\I,"Cell R2 log",sLine;
+        Open "HOME:"\File:=sLogFile,logFile\Append;
+        Write logFile,CDate()+" "+sLine;
+        Close logFile;
+    ERROR
+        ! If the file can't be written, skip it and keep the robot running
+        RETURN;
+    ENDPROC
+ENDMODULE

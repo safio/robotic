@@ -196,3 +196,9 @@ All targets (P0, P1, P2, circle points) are positions of this TCP, not of the fl
 - `jHome` and the tool load data are placeholders until taught or measured on the real cell.
 - The circle is always in a plane of `wobj0`. For drawing on a tilted canvas, define a work object on the canvas and pass it instead of `wobj0`.
 - Targets are `CONST`. To retouch them on the FlexPendant, use *Modify Position*, or change them to `PERS`.
+
+---
+
+## Second program: conveyor cell with two robots
+
+See [`conveyor_cell/`](conveyor_cell/README.md). It is a MultiMove pick-and-place program in which two robots take turns picking parts from one conveyor.
